@@ -220,7 +220,45 @@ OBX|7|NM|68060^MDC_ATTR_PT_HEIGHT^MDC||170.5|263441^MDC_DIM_CENTI_M^MDC|||||F
 
 ---
 
-## 5. Security & Lessons Learned
+## 5. Deployment, Infrastructure & Security
+
+Edge deployment: one gateway per hospital, inside the hospital LAN. No inbound access from the internet.
+
+```mermaid
+flowchart LR
+    subgraph OPD["OPD Network"]
+        K["Vital Sign Kiosks"]
+    end
+    subgraph EDGE["Edge Mini PC (Ubuntu)"]
+        GW["Gateway container<br/>:3000"]
+        DB[("Staging DB")]
+    end
+    subgraph HISNET["HIS VLAN"]
+        HDB[("HIS DB / API")]
+        SMB["SMB Shared Folder"]
+    end
+    K -->|"HTTP(S) LAN only"| GW
+    GW --- DB
+    GW -->|"firewall: HIS ports only"| HDB
+    GW -->|"CIFS mount"| SMB
+```
+
+- **Hardware:** Edge Linux mini PC (Ubuntu Server LTS) in the hospital server room or rack. BIOS set to power on after AC loss.
+- **Runtime:**
+    - The gateway runs in a Docker container (Node 18 Alpine, timezone set to local time because the "today's data" logic uses the machine clock).
+    - The container uses `restart: unless-stopped` and Docker Engine is enabled in systemd. After a power cut the service comes back by itself.
+    - The staging DB sits on a persistent volume, so recreating the container keeps the data.
+- **Hospital network:**
+    - Static IP (or DHCP reservation) so kiosks always hit the same address.
+    - Firewall (UFW): inbound only the API port from the kiosk subnet and SSH from admin machines. Outbound to the HIS side only the DB / API / SMB ports actually used.
+    - Access to the HIS VLAN goes through rules approved by hospital IT. The DB account can only read the agreed view and write the agreed inbound table.
+    - The SMB shared folder is mounted via CIFS with a dedicated service account. Credentials live in a root-only file, never in scripts or the repo.
+- **Config & secrets:** Per-site values (adapter, connections, device mapping) live in a local `.env` file that is never committed. The same image runs at every site.
+- **Updates via GitLab:** Code lives on GitLab with feature / site branches. Update = `git pull` → `docker build` → recreate the container. If something breaks, roll back to the previous tag/image. Readings queued during the update stay in the staging DB and go out once the service is back.
+
+---
+
+## 6. Security & Lessons Learned
 
 - **Patient data and security standards (PDPA & ISO 27001):** Access is split by department/site. Only the authorized gateway machine can reach the staging DB and shared folder. Data in transit goes over HTTPS. Data flow and asset register docs follow ISO/IEC 27001.
 - **Patient identity on site:** Some patients have no ID card or no visit opened yet. The kiosk accepts ID card, QR on the visit slip, or a typed HN / temporary code. If the nurse opens the visit later, the same-day retry picks it up.

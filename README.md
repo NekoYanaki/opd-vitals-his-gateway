@@ -220,7 +220,45 @@ OBX|7|NM|68060^MDC_ATTR_PT_HEIGHT^MDC||170.5|263441^MDC_DIM_CENTI_M^MDC|||||F
 
 ---
 
-## 5. ความปลอดภัยและบทเรียนจากหน้างาน (Security & Lessons Learned)
+## 5. Deployment, Infrastructure & Security
+
+ติดตั้งแบบ Edge: Gateway 1 เครื่องต่อ 1 โรงพยาบาล วางอยู่ในเครือข่ายภายในของโรงพยาบาล ไม่เปิดออก Internet ฝั่งขาเข้า
+
+```mermaid
+flowchart LR
+    subgraph OPD["OPD Network"]
+        K["Vital Sign Kiosks"]
+    end
+    subgraph EDGE["Edge Mini PC (Ubuntu)"]
+        GW["Gateway container<br/>:3000"]
+        DB[("Staging DB")]
+    end
+    subgraph HISNET["HIS VLAN"]
+        HDB[("HIS DB / API")]
+        SMB["SMB Shared Folder"]
+    end
+    K -->|"HTTP(S) LAN only"| GW
+    GW --- DB
+    GW -->|"firewall: HIS ports only"| HDB
+    GW -->|"CIFS mount"| SMB
+```
+
+- **Hardware:** Edge Linux Mini PC (Ubuntu Server LTS) ตั้งในห้อง Server หรือตู้ Rack ของโรงพยาบาล ตั้งค่า BIOS ให้เปิดเครื่องเองเมื่อไฟกลับมา (Power-on after AC loss)
+- **Runtime:**
+    - Gateway รันใน Docker Container (Node 18 Alpine, ตั้ง Timezone เป็นเวลาไทย เพราะ Logic "ข้อมูลของวันนี้" อิงเวลาเครื่อง)
+    - Container ใช้ `restart: unless-stopped` และ Docker Engine ถูก enable ผ่าน Systemd ไฟดับแล้วกลับมา ระบบขึ้นเองโดยไม่ต้องมีคนไปกด
+    - Staging DB เก็บบน Volume ถาวร Container ถูกสร้างใหม่ข้อมูลก็ไม่หาย
+- **Network ภายในโรงพยาบาล:**
+    - Gateway ใช้ Static IP (หรือ DHCP Reservation) ให้ตู้ชี้มาที่ Address เดิมเสมอ
+    - Firewall (UFW) ขาเข้าเปิดเฉพาะพอร์ต API จาก Subnet ของตู้ และ SSH จากเครื่องผู้ดูแล ขาออกไปฝั่ง HIS เปิดเฉพาะพอร์ตฐานข้อมูล / API / SMB ที่ใช้จริง
+    - เชื่อมเข้า VLAN ฝั่ง HIS ผ่าน Rule ที่ทีม IT โรงพยาบาลอนุมัติ ใช้บัญชีฐานข้อมูลที่มีสิทธิ์เฉพาะ View และตารางรับข้อมูลที่ตกลงกันไว้
+    - Shared Folder (SMB) Mount ผ่าน CIFS ด้วยบัญชี Service เฉพาะ เก็บ Credential ในไฟล์ที่อ่านได้เฉพาะ root ไม่เขียนลงใน Script หรือ Repo
+- **Config & Secrets:** ค่าเฉพาะแต่ละโรงพยาบาล (Adapter, Connection, Device Mapping) อยู่ในไฟล์ `.env` บนเครื่อง ไม่ commit เข้า Git Image เดียวใช้ได้ทุกไซต์
+- **Update ผ่าน GitLab:** โค้ดอยู่บน GitLab แยก Branch ตาม Feature / ไซต์ อัปเดตโดย `git pull` → `docker build` → สร้าง Container ใหม่ ถ้ามีปัญหาย้อนกลับไป Tag/Image เวอร์ชันก่อนหน้าได้ทันที ผลวัดที่ค้างระหว่างอัปเดตยังอยู่ใน Staging DB และถูกส่งต่อเมื่อระบบกลับมา
+
+---
+
+## 6. ความปลอดภัยและบทเรียนจากหน้างาน (Security & Lessons Learned)
 
 - **ข้อมูลผู้ป่วยและมาตรฐานความปลอดภัย (PDPA & ISO 27001):** แยกสิทธิ์การเข้าถึงข้อมูลตามหน่วยงาน/สาขา Staging DB และ Shared Folder เข้าได้เฉพาะเครื่อง Gateway ที่อนุญาต ส่งข้อมูลผ่าน HTTPS และทำเอกสาร Data Flow / Asset Register ตามแนวทาง ISO/IEC 27001
 - **ระบุตัวผู้ป่วยหน้างานจริง:** บางรายไม่มีบัตรหรือยังไม่ได้เปิด Visit จึงรองรับทั้งบัตรประชาชน, QR บนใบนำทาง และกรอก HN/รหัสชั่วคราว ถ้าพยาบาลเปิด Visit ทีหลัง ระบบ Retry ภายในวันเดียวกันจะส่งให้เอง
